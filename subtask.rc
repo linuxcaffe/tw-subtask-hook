@@ -1,0 +1,11 @@
+# subtask.rc
+# Taskwarrior configuration for tw-subtask-hook
+# Version: 1.0.0
+#
+# No UDAs are required — parent/child relationships are tracked via the
+# native dep: field and the UUID embedded in the annotation line.
+#
+# Include this file from ~/.taskrc if you want a central place for future
+# subtask-related configuration:
+#
+#   include ~/.task/config/subtask.rc
