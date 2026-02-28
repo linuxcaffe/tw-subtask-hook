@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Taskwarrior Subtask Hook - On-Modify
-Version: 1.0.0
+Version: 1.1.0
 Date: 2026-02-28
 
 Activates subtask annotations as real dependent tasks when a parent task
@@ -112,8 +112,9 @@ if os.environ.get('TW_TIMING'):
 # Attributes inherited from parent task to child
 INHERITED_ATTRS = ('project', 'priority', 'due', 'scheduled', 'until', 'wait')
 
-# Dormant subtask annotation: - [ ] <content>
-DORMANT_RE = re.compile(r'^- \[ \] (.+)$')
+# Dormant subtask line: - [ ] <content>
+# Slightly flexible: allows extra whitespace after the closing bracket.
+DORMANT_RE = re.compile(r'^- \[ \]\s+(.+?)$')
 
 # Inline attribute overrides in annotation text: key:value
 # Only known inheritable attributes are matched.
@@ -241,8 +242,46 @@ def create_child_task(annotation_content, parent_task):
 # Case 1: Parent task started — activate subtask annotations
 # ============================================================================
 
+def collect_dormant_subtasks(annotations):
+    """Scan every line of every annotation for dormant subtask patterns.
+
+    An annotation description may contain multiple lines with arbitrary
+    content; only lines matching DORMANT_RE are treated as subtasks.
+
+    Returns:
+        List of (ann_idx, line_idx, annotation_content) tuples, in order.
+        ann_idx  — index into the annotations list
+        line_idx — index of the matching line within that annotation's text
+        annotation_content — captured group after '- [ ] '
+    """
+    results = []
+    for ann_idx, ann in enumerate(annotations):
+        desc = ann.get('description', '')
+        for line_idx, line in enumerate(desc.splitlines()):
+            m = DORMANT_RE.match(line.strip())
+            if m:
+                results.append((ann_idx, line_idx, m.group(1).strip()))
+    debug_log(f"collect_dormant_subtasks: found {len(results)}", 2)
+    return results
+
+
+def rewrite_annotation_line(annotations, ann_idx, line_idx, new_line_text):
+    """Return a new annotations list with one line replaced in one annotation."""
+    ann = dict(annotations[ann_idx])
+    lines = ann['description'].splitlines()
+    lines[line_idx] = new_line_text
+    ann['description'] = '\n'.join(lines)
+    updated = list(annotations)
+    updated[ann_idx] = ann
+    return updated
+
+
 def handle_parent_started(old_task, new_task):
     """Interactively prompt to activate dormant subtask annotations.
+
+    Scans every line of every annotation for '- [ ] …' patterns — handles
+    any number of subtasks across any number of annotations, with arbitrary
+    other content on other lines.
 
     Reads user input from /dev/tty (bypassing hook stdin/stdout).
     Outputs modified new_task JSON with updated annotations and depends list.
@@ -253,13 +292,9 @@ def handle_parent_started(old_task, new_task):
         print(json.dumps(new_task))
         return
 
-    # Identify dormant subtask annotations.
-    dormant = [
-        (i, ann) for i, ann in enumerate(annotations)
-        if DORMANT_RE.match(ann.get('description', ''))
-    ]
+    dormant = collect_dormant_subtasks(annotations)
     if not dormant:
-        debug_log("handle_parent_started: no dormant subtasks", 1)
+        debug_log("handle_parent_started: no dormant subtasks found", 1)
         print(json.dumps(new_task))
         return
 
@@ -284,13 +319,7 @@ def handle_parent_started(old_task, new_task):
     activate_all = False
 
     try:
-        for i, ann in dormant:
-            raw_desc = ann.get('description', '')
-            m = DORMANT_RE.match(raw_desc)
-            if not m:
-                continue
-
-            annotation_content = m.group(1)
+        for ann_idx, line_idx, annotation_content in dormant:
             clean_desc, _, _ = parse_annotation_content(annotation_content)
 
             if activate_all:
@@ -312,7 +341,7 @@ def handle_parent_started(old_task, new_task):
                 activate_all = True
                 choice = 'y'
 
-            # Activate this annotation.
+            # Activate this subtask line.
             child_uuid = create_child_task(annotation_content, new_task)
             if child_uuid is None:
                 sys.stderr.write(
@@ -324,10 +353,11 @@ def handle_parent_started(old_task, new_task):
             if child_uuid not in new_depends:
                 new_depends.append(child_uuid)
 
-            # Rewrite annotation: - [ ] … → - [P] … <child_uuid>
-            new_ann = dict(ann)
-            new_ann['description'] = f'- [P] {annotation_content} {child_uuid}'
-            updated_annotations[i] = new_ann
+            # Rewrite this line: - [ ] … → - [P] … <child_uuid>
+            new_line = f'- [P] {annotation_content} {child_uuid}'
+            updated_annotations = rewrite_annotation_line(
+                updated_annotations, ann_idx, line_idx, new_line
+            )
 
             tty.write(f'[subtask] → Created child {child_uuid[:8]}… "{clean_desc}"\n')
             tty.flush()
@@ -350,10 +380,13 @@ def handle_parent_started(old_task, new_task):
 # ============================================================================
 
 def find_parent_task(child_uuid):
-    """Search pending/waiting tasks for a [P] annotation referencing child_uuid.
+    """Search pending/waiting tasks for a [P] annotation line referencing child_uuid.
+
+    Scans every line of every annotation so subtask markers embedded in
+    multi-line annotation text are found correctly.
 
     Returns:
-        (parent_task_dict, annotation_index) or (None, None)
+        (parent_task_dict, ann_idx, line_idx) or (None, None, None)
     """
     try:
         result = subprocess.run(
@@ -362,7 +395,7 @@ def find_parent_task(child_uuid):
         )
         if not result.stdout.strip():
             debug_log("find_parent_task: empty export result", 1)
-            return None, None
+            return None, None, None
 
         all_tasks = json.loads(result.stdout)
         debug_log(f"find_parent_task: searching {len(all_tasks)} tasks for {child_uuid}", 2)
@@ -370,18 +403,21 @@ def find_parent_task(child_uuid):
         for task in all_tasks:
             if task.get('uuid') == child_uuid:
                 continue
-            for idx, ann in enumerate(task.get('annotations', [])):
+            for ann_idx, ann in enumerate(task.get('annotations', [])):
                 desc = ann.get('description', '')
-                if '[P]' in desc and child_uuid in desc:
-                    debug_log(f"Found parent: {task['uuid']} annotation[{idx}]", 1)
-                    return task, idx
+                for line_idx, line in enumerate(desc.splitlines()):
+                    if '[P]' in line and child_uuid in line:
+                        debug_log(
+                            f"Found parent: {task['uuid']} ann[{ann_idx}] line[{line_idx}]", 1
+                        )
+                        return task, ann_idx, line_idx
 
     except (subprocess.SubprocessError, json.JSONDecodeError) as e:
         sys.stderr.write(f"[subtask] ERROR searching for parent task: {e}\n")
         debug_log(f"find_parent_task error: {e}", 1)
 
     debug_log(f"find_parent_task: no parent found for {child_uuid}", 1)
-    return None, None
+    return None, None, None
 
 
 def handle_child_status_changed(old_task, new_task):
@@ -396,20 +432,22 @@ def handle_child_status_changed(old_task, new_task):
 
     debug_log(f"handle_child_status_changed: {child_uuid} → [{marker}]", 1)
 
-    parent_task, ann_idx = find_parent_task(child_uuid)
+    parent_task, ann_idx, line_idx = find_parent_task(child_uuid)
     if parent_task is None:
         debug_log("No parent found — passing through unchanged", 1)
         print(json.dumps(new_task))
         return
 
-    # Mutate the annotation in a copy: [P] → [C] or [D]
+    # Mutate the specific line in the annotation: [P] → [C] or [D]
     annotations = [dict(a) for a in parent_task.get('annotations', [])]
-    old_desc = annotations[ann_idx]['description']
-    annotations[ann_idx]['description'] = old_desc.replace('[P]', f'[{marker}]', 1)
+    lines = annotations[ann_idx]['description'].splitlines()
+    old_line = lines[line_idx]
+    lines[line_idx] = old_line.replace('[P]', f'[{marker}]', 1)
+    annotations[ann_idx]['description'] = '\n'.join(lines)
     parent_task['annotations'] = annotations
 
     debug_log(
-        f"Updating parent annotation:\n  old: {old_desc}\n  new: {annotations[ann_idx]['description']}",
+        f"Updating parent annotation line:\n  old: {old_line}\n  new: {lines[line_idx]}",
         1
     )
 
