@@ -96,12 +96,96 @@ if os.environ.get('TW_TIMING'):
 
 PENDING_FILE = Path.home() / '.task' / 'subtask_pending.json'
 
+# Annotation-update file: queued [P]→[C/D] rewrites from on-modify
+UPDATE_PENDING_FILE = Path.home() / '.task' / 'subtask_update_pending.json'
+
+
+# ============================================================================
+# Annotation update (Case 2: child completed or deleted)
+# ============================================================================
+
+def apply_annotation_updates(updates):
+    """Find parent tasks and rewrite [P] → [C] or [D] annotation markers.
+
+    Called after TW has committed all modifications to disk, so our import
+    here is the final write and won't be overwritten by TW's in-memory state.
+    """
+    try:
+        result = subprocess.run(
+            ['task', 'rc.hooks=off', 'rc.confirmation=off',
+             'rc.verbose=nothing', 'rc.context=', 'export'],
+            capture_output=True, text=True, check=False
+        )
+        all_tasks = json.loads(result.stdout) if result.stdout.strip() else []
+    except (subprocess.SubprocessError, json.JSONDecodeError) as e:
+        sys.stderr.write(f"[subtask] ERROR exporting for annotation update: {e}\n")
+        return
+
+    debug_log(f"apply_annotation_updates: {len(updates)} update(s), {len(all_tasks)} tasks", 1)
+
+    for update in updates:
+        short_uuid = update.get('child_short', '')
+        marker     = update.get('marker', 'C')
+        if not short_uuid:
+            continue
+
+        parent_task = ann_idx = line_idx = None
+        for task in all_tasks:
+            for a_idx, ann in enumerate(task.get('annotations', [])):
+                for l_idx, line in enumerate(ann.get('description', '').splitlines()):
+                    if '[P]' in line and short_uuid in line:
+                        parent_task, ann_idx, line_idx = task, a_idx, l_idx
+                        break
+                if parent_task:
+                    break
+            if parent_task:
+                break
+
+        if parent_task is None:
+            sys.stderr.write(f"[subtask] WARNING: no parent found for {short_uuid}\n")
+            continue
+
+        annotations = [dict(a) for a in parent_task.get('annotations', [])]
+        lines = annotations[ann_idx]['description'].splitlines()
+        old_line = lines[line_idx]
+        lines[line_idx] = old_line.replace('[P]', f'[{marker}]', 1)
+        annotations[ann_idx]['description'] = '\n'.join(lines)
+        parent_task['annotations'] = annotations
+
+        debug_log(f"Updating: {old_line!r} → {lines[line_idx]!r}", 1)
+
+        result = subprocess.run(
+            ['task', 'rc.hooks=off', 'rc.confirmation=off',
+             'rc.verbose=nothing', 'import'],
+            input=json.dumps([parent_task]),
+            capture_output=True, text=True, check=False
+        )
+        if result.returncode != 0:
+            sys.stderr.write(
+                f"[subtask] WARNING: annotation import failed: {result.stderr.strip()}\n"
+            )
+        else:
+            debug_log(f"Updated parent annotation [{marker}] for {short_uuid}", 1)
+
 
 # ============================================================================
 # Main
 # ============================================================================
 
 def main():
+    # --- Process annotation updates (Case 2) ---
+    if UPDATE_PENDING_FILE.exists():
+        try:
+            raw = UPDATE_PENDING_FILE.read_text()
+            UPDATE_PENDING_FILE.unlink()
+            updates = json.loads(raw)
+        except Exception as e:
+            debug_log(f"Failed to read update pending file: {e}", 1)
+            updates = []
+        if updates:
+            apply_annotation_updates(updates)
+
+    # --- Process new child task creations (Case 1) ---
     if not PENDING_FILE.exists():
         return
 
@@ -118,6 +202,8 @@ def main():
         return
 
     debug_log(f"Processing {len(pending)} pending child task(s)", 1)
+
+    parent_uuids = set()
 
     for item in pending:
         parent_uuid = item.pop('parent_uuid', None)
@@ -165,8 +251,18 @@ def main():
                 capture_output=True, check=False
             )
             debug_log(f"Added dep: {parent_uuid} blocked by {child_uuid}", 1)
+            parent_uuids.add(parent_uuid)
 
         print(f'[subtask] -> Created task {task_id} "{desc}"')
+
+    # Stop parent tasks — they are now blocked by their new children.
+    for parent_uuid in parent_uuids:
+        subprocess.run(
+            ['task', 'rc.hooks=off', 'rc.confirmation=off',
+             'rc.verbose=nothing', parent_uuid, 'stop'],
+            capture_output=True, check=False
+        )
+        debug_log(f"Stopped parent {parent_uuid}", 1)
 
 
 if __name__ == '__main__':

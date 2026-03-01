@@ -131,6 +131,9 @@ INLINE_TAG_RE = re.compile(r'(?<!\S)\+(\w+)')
 # Pending-tasks file written by on-modify, consumed by on-exit
 PENDING_FILE = Path.home() / '.task' / 'subtask_pending.json'
 
+# Annotation-update file: queues [P]→[C/D] rewrites for on-exit
+UPDATE_PENDING_FILE = Path.home() / '.task' / 'subtask_update_pending.json'
+
 
 # ============================================================================
 # Annotation Content Parsing
@@ -341,76 +344,31 @@ def handle_parent_started(old_task, new_task):
 
 
 # ============================================================================
-# Case 2: Child task completed or deleted — update parent annotation
+# Case 2: Child task completed or deleted — queue annotation update for on-exit
 # ============================================================================
 
-def find_parent_task(child_uuid):
-    """Search pending/waiting tasks for a [P] annotation line with child_uuid.
-
-    Returns (parent_task_dict, ann_idx, line_idx) or (None, None, None).
-    """
-    short_uuid = child_uuid[:8]
-    try:
-        result = subprocess.run(
-            ['task', 'rc.hooks=off', 'rc.confirmation=off',
-             'rc.verbose=nothing', 'rc.context=', 'export'],
-            capture_output=True, text=True, check=False
-        )
-        if not result.stdout.strip():
-            sys.stderr.write(f"[subtask] WARNING: task export returned no output\n")
-            return None, None, None
-
-        all_tasks = json.loads(result.stdout)
-        debug_log(f"find_parent_task: searching {len(all_tasks)} tasks for {short_uuid}", 2)
-
-        for task in all_tasks:
-            if task.get('uuid') == child_uuid:
-                continue
-            for ann_idx, ann in enumerate(task.get('annotations', [])):
-                for line_idx, line in enumerate(ann.get('description', '').splitlines()):
-                    if '[P]' in line and short_uuid in line:
-                        debug_log(f"Found parent {task['uuid']} ann[{ann_idx}] line[{line_idx}]", 1)
-                        return task, ann_idx, line_idx
-
-    except (subprocess.SubprocessError, json.JSONDecodeError) as e:
-        sys.stderr.write(f"[subtask] ERROR searching for parent: {e}\n")
-
-    sys.stderr.write(f"[subtask] WARNING: no parent found for child {short_uuid}\n")
-    return None, None, None
-
-
 def handle_child_status_changed(old_task, new_task):
-    """Update parent annotation when child is completed or deleted."""
+    """Queue [P]→[C/D] annotation rewrite for on-exit.
+
+    We cannot do the task import here: when 'task delete' runs, TW also
+    modifies the parent in-memory (to remove the dep), then calls on-modify
+    for the parent. That second hook call outputs TW's stale in-memory parent
+    (still [P]) which overwrites our import. Queuing for on-exit avoids this.
+    """
     child_uuid = new_task['uuid']
     marker = 'C' if new_task['status'] == 'completed' else 'D'
 
-    debug_log(f"handle_child_status_changed: {child_uuid} → [{marker}]", 1)
-
-    parent_task, ann_idx, line_idx = find_parent_task(child_uuid)
-    if parent_task is None:
-        debug_log("No parent found, passing through", 1)
-        print(json.dumps(new_task))
-        return
-
-    annotations = [dict(a) for a in parent_task.get('annotations', [])]
-    lines = annotations[ann_idx]['description'].splitlines()
-    old_line = lines[line_idx]
-    lines[line_idx] = old_line.replace('[P]', f'[{marker}]', 1)
-    annotations[ann_idx]['description'] = '\n'.join(lines)
-    parent_task['annotations'] = annotations
-
-    debug_log(f"Updating: {old_line!r} → {lines[line_idx]!r}", 1)
+    debug_log(f"handle_child_status_changed: {child_uuid[:8]} → [{marker}]", 1)
 
     try:
-        result = subprocess.run(
-            ['task', 'rc.hooks=off', 'rc.confirmation=off', 'import'],
-            input=json.dumps([parent_task]),
-            capture_output=True, text=True, check=False
-        )
-        if result.returncode != 0:
-            sys.stderr.write(f"[subtask] WARNING: import failed: {result.stderr}\n")
-    except subprocess.SubprocessError as e:
-        sys.stderr.write(f"[subtask] ERROR: {e}\n")
+        existing = []
+        if UPDATE_PENDING_FILE.exists():
+            existing = json.loads(UPDATE_PENDING_FILE.read_text())
+        existing.append({'child_short': child_uuid[:8], 'marker': marker})
+        UPDATE_PENDING_FILE.write_text(json.dumps(existing, indent=2))
+        debug_log(f"Queued [{marker}] update for {child_uuid[:8]}", 1)
+    except (IOError, json.JSONDecodeError) as e:
+        sys.stderr.write(f"[subtask] ERROR writing update file: {e}\n")
 
     print(json.dumps(new_task))
 
