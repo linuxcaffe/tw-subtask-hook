@@ -1,0 +1,8 @@
+======================================================================
+Debug Session - 2026-02-28 23:30:56
+Script: on-modify_subtask
+TW_DEBUG Level: 1
+======================================================================
+
+23:30:56.809 [DEBUG-1] Debug logging initialized: /home/djp/dev/tw-subtask-hook/logs/debug/on-modify_subtask_debug_20260228_233056.log
+23:30:56.810 [DEBUG-1] main: uuid=ab20d945-5386-4117-9c8f-8531d1466a09 old_status=pending new_status=pending start_event=False

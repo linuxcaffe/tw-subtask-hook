@@ -1,0 +1,13 @@
+======================================================================
+Debug Session - 2026-02-28 23:31:19
+Script: on-modify_subtask
+TW_DEBUG Level: 1
+======================================================================
+
+23:31:19.407 [DEBUG-1] Debug logging initialized: /home/djp/dev/tw-subtask-hook/logs/debug/on-modify_subtask_debug_20260228_233119.log
+23:31:19.408 [DEBUG-1] main: uuid=ab20d945-5386-4117-9c8f-8531d1466a09 old_status=pending new_status=pending start_event=True
+23:31:19.408 [DEBUG-1] Case 1: parent task started
+23:31:19.408 [DEBUG-1] handle_parent_started: 2 dormant subtask(s)
+23:31:30.640 [DEBUG-1] Child UUID: eb6ccbfd-522f-47c5-9841-670b011fe8c2
+23:31:30.640 [DEBUG-1] Activated: 're-attach mirror' → eb6ccbfd-522f-47c5-9841-670b011fe8c2
+23:31:36.043 [DEBUG-1] Skipped: fix belt squeak
