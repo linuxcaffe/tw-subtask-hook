@@ -301,16 +301,28 @@ def handle_parent_started(old_task, new_task):
     debug_log(f"handle_parent_started: {len(dormant)} dormant subtask(s)", 1)
 
     # Open /dev/tty so prompts bypass hook stdin/stdout.
-    # Use separate read/write opens — character devices don't support r+ (seek).
+    # Use raw OS fd calls — Python's buffered TextIOWrapper calls tell() during
+    # init, which raises UnsupportedOperation on character devices.
     try:
-        tty_out = open('/dev/tty', 'w')
-        tty_in  = open('/dev/tty', 'r')
+        tty_fd = os.open('/dev/tty', os.O_RDWR | os.O_NOCTTY)
     except OSError as e:
         sys.stderr.write(
             f"[subtask] Cannot open /dev/tty: {e} — skipping subtask activation\n"
         )
         print(json.dumps(new_task))
         return
+
+    def tty_write(s):
+        os.write(tty_fd, s.encode())
+
+    def tty_readline():
+        chars = []
+        while True:
+            c = os.read(tty_fd, 1).decode('utf-8', errors='replace')
+            if c in ('\n', '\r', ''):
+                break
+            chars.append(c)
+        return ''.join(chars)
 
     updated_annotations = list(annotations)
     existing_depends = new_task.get('depends', [])
@@ -327,9 +339,8 @@ def handle_parent_started(old_task, new_task):
             if activate_all:
                 choice = 'y'
             else:
-                tty_out.write(f'[subtask] Activate "{clean_desc}"? [Y/n/a/q] ')
-                tty_out.flush()
-                raw_input = tty_in.readline().strip().lower()
+                tty_write(f'[subtask] Activate "{clean_desc}"? [Y/n/a/q] ')
+                raw_input = tty_readline().strip().lower()
                 choice = raw_input if raw_input else 'y'
 
             if choice == 'q':
@@ -361,13 +372,11 @@ def handle_parent_started(old_task, new_task):
                 updated_annotations, ann_idx, line_idx, new_line
             )
 
-            tty_out.write(f'[subtask] → Created child {child_uuid[:8]}… "{clean_desc}"\n')
-            tty_out.flush()
+            tty_write(f'[subtask] → Created child {child_uuid[:8]}… "{clean_desc}"\n')
             debug_log(f"Activated: '{clean_desc}' → {child_uuid}", 1)
 
     finally:
-        tty_in.close()
-        tty_out.close()
+        os.close(tty_fd)
 
     new_task['annotations'] = updated_annotations
     if new_depends:
