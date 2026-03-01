@@ -41,6 +41,8 @@ Activated subtasks become real Taskwarrior tasks inheriting the parent's
 attributes, and the parent gains a `dep:` on each child (blocking it until
 all children are done).
 
+After activating any subtasks, the parent is automatically `task ID stop`ped
+
 ### On child complete or delete
 
 When a child task is marked `done` or `delete`d, the hook automatically

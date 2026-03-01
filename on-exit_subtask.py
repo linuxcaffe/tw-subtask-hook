@@ -97,6 +97,9 @@ PENDING_FILE = Path.home() / '.task' / 'subtask_pending.json'
 # Annotation-update file: queued [P]→[C/D] rewrites from on-modify
 UPDATE_PENDING_FILE = Path.home() / '.task' / 'subtask_update_pending.json'
 
+# Registry of child UUIDs — lets on-modify skip Case 2 for unrelated tasks
+SUBTASK_REGISTRY = Path.home() / '.task' / 'config' / 'subtask_registry.json'
+
 
 # ============================================================================
 # Annotation update (Case 2: child completed or deleted)
@@ -164,6 +167,13 @@ def apply_annotation_updates(updates):
             )
         else:
             debug_log(f"Updated parent annotation [{marker}] for {short_uuid}", 1)
+            # Remove from registry — child is done, no future updates needed.
+            try:
+                reg = json.loads(SUBTASK_REGISTRY.read_text()) if SUBTASK_REGISTRY.exists() else []
+                reg = [u for u in reg if not u.startswith(short_uuid)]
+                SUBTASK_REGISTRY.write_text(json.dumps(reg))
+            except Exception:
+                pass
 
 
 # ============================================================================
@@ -250,6 +260,15 @@ def main():
             )
             debug_log(f"Added dep: {parent_uuid} blocked by {child_uuid}", 1)
             parent_uuids.add(parent_uuid)
+
+        # Register child UUID so on-modify recognises it for Case 2.
+        try:
+            reg = json.loads(SUBTASK_REGISTRY.read_text()) if SUBTASK_REGISTRY.exists() else []
+            if child_uuid not in reg:
+                reg.append(child_uuid)
+                SUBTASK_REGISTRY.write_text(json.dumps(reg))
+        except Exception as e:
+            debug_log(f"Could not update subtask registry: {e}", 2)
 
         print(f'[subtask] -> Created task {task_id} "{desc}"')
 

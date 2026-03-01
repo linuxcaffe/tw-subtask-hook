@@ -132,6 +132,9 @@ PENDING_FILE = Path.home() / '.task' / 'subtask_pending.json'
 # Annotation-update file: queues [P]→[C/D] rewrites for on-exit
 UPDATE_PENDING_FILE = Path.home() / '.task' / 'subtask_update_pending.json'
 
+# Registry of child UUIDs created by this hook — used to filter Case 2
+SUBTASK_REGISTRY = Path.home() / '.task' / 'config' / 'subtask_registry.json'
+
 
 # ============================================================================
 # Annotation Content Parsing
@@ -403,13 +406,20 @@ def main():
         handle_parent_started(old_task, new_task)
         return
 
-    # Case 2: child task completed or deleted
+    # Case 2: child task completed or deleted — only for our subtasks
     old_status = old_task.get('status')
     new_status = new_task.get('status')
     if old_status != new_status and new_status in ('completed', 'deleted'):
-        debug_log("Case 2: status → completed/deleted", 1)
-        handle_child_status_changed(old_task, new_task)
-        return
+        child_uuid = new_task.get('uuid', '')
+        try:
+            reg = json.loads(SUBTASK_REGISTRY.read_text()) if SUBTASK_REGISTRY.exists() else []
+        except Exception:
+            reg = []
+        if child_uuid in reg:
+            debug_log("Case 2: status → completed/deleted", 1)
+            handle_child_status_changed(old_task, new_task)
+            return
+        debug_log(f"Case 2 skipped: {child_uuid[:8]} not in subtask registry", 2)
 
     debug_log("No matching case, passing through", 2)
     print(json.dumps(new_task))
