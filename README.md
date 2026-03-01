@@ -1,8 +1,8 @@
 # tw-subtask-hook
 
-A Taskwarrior `on-modify` hook that turns dormant subtask annotations into
+Taskwarrior hooks that turns dormant subtask annotations into
 real dependent tasks — interactively when you start a task, and automatically
-updating annotation state when children finish.
+updates annotation state when child tasks are completed or deleted.
 
 ## Annotation Format
 
@@ -68,19 +68,28 @@ Inline annotation attributes override the parent value for that child only.
 
 ## Installation
 
-### Via awesome-taskwarrior
-
-```bash
-awesome-taskwarrior install subtask
-```
-
-### Manual
+### Option 1 - download and run the included installer
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/linuxcaffe/tw-subtask-hook/main/subtask.install | bash
 ```
+### Option 2 - Via [awesome-taskwarrior](https://github.com/linuxcaffe/awesome-taskwarrior)
 
-Or copy `on-modify_subtask.py` to `~/.task/hooks/` and `chmod +x` it.
+```bash
+tw -I subtask
+```
+
+### Option 3 - Manual (the usual taskwarrior way)
+
+Copy `on-modify_subtask.py` and `on-exit_subtask` to `~/.task/hooks/` and `chmod +x` them.
+
+## Confirm hook status with
+
+```bash
+task diag
+```
+
+to see them executable inder the Hooks section
 
 ## Example
 
@@ -101,12 +110,11 @@ task <id> start
 # [subtask] → Created child 7d4e9f1a… "Sweep the floor"
 # [subtask] Activate "Put away tools"? [Y/n/a/q] n
 
-# View subtasks in task list
-task list
+# View activated subtasks with `task proj:home +chores list`
 
 # Complete a child task — parent annotation updates automatically
 task 3f8a1b2c done
-# Parent annotation: - [P] Stack the wood +outdoor → - [C] Stack the wood +outdoor <uuid>
+# Parent annotation: - [P] Stack the wood project:home +outdoor +chores → - [C] Stack the wood project:home +outdoor +chores <uuid>
 ```
 
 ## Debugging
