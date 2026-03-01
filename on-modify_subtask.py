@@ -203,8 +203,8 @@ def build_child_task(annotation_content, parent_task, child_uuid):
         task['tags'] = merged_tags
         enriched.extend(f'+{t}' for t in merged_tags)
 
-    # Full UUID appended for reliable Case-2 parent lookup
-    enriched.append(child_uuid)
+    # Short UUID appended for Case-2 parent lookup (8 chars, unique enough)
+    enriched.append(child_uuid[:8])
 
     return task, ' '.join(enriched)
 
@@ -349,29 +349,33 @@ def find_parent_task(child_uuid):
 
     Returns (parent_task_dict, ann_idx, line_idx) or (None, None, None).
     """
+    short_uuid = child_uuid[:8]
     try:
         result = subprocess.run(
-            ['task', 'rc.hooks=off', 'rc.confirmation=off', 'export'],
+            ['task', 'rc.hooks=off', 'rc.confirmation=off',
+             'rc.verbose=nothing', 'rc.context=', 'export'],
             capture_output=True, text=True, check=False
         )
         if not result.stdout.strip():
+            sys.stderr.write(f"[subtask] WARNING: task export returned no output\n")
             return None, None, None
 
         all_tasks = json.loads(result.stdout)
-        debug_log(f"find_parent_task: searching {len(all_tasks)} tasks", 2)
+        debug_log(f"find_parent_task: searching {len(all_tasks)} tasks for {short_uuid}", 2)
 
         for task in all_tasks:
             if task.get('uuid') == child_uuid:
                 continue
             for ann_idx, ann in enumerate(task.get('annotations', [])):
                 for line_idx, line in enumerate(ann.get('description', '').splitlines()):
-                    if '[P]' in line and child_uuid in line:
+                    if '[P]' in line and short_uuid in line:
                         debug_log(f"Found parent {task['uuid']} ann[{ann_idx}] line[{line_idx}]", 1)
                         return task, ann_idx, line_idx
 
     except (subprocess.SubprocessError, json.JSONDecodeError) as e:
         sys.stderr.write(f"[subtask] ERROR searching for parent: {e}\n")
 
+    sys.stderr.write(f"[subtask] WARNING: no parent found for child {short_uuid}\n")
     return None, None, None
 
 
