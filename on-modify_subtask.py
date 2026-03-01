@@ -301,8 +301,10 @@ def handle_parent_started(old_task, new_task):
     debug_log(f"handle_parent_started: {len(dormant)} dormant subtask(s)", 1)
 
     # Open /dev/tty so prompts bypass hook stdin/stdout.
+    # Use separate read/write opens — character devices don't support r+ (seek).
     try:
-        tty = open('/dev/tty', 'r+')
+        tty_out = open('/dev/tty', 'w')
+        tty_in  = open('/dev/tty', 'r')
     except OSError as e:
         sys.stderr.write(
             f"[subtask] Cannot open /dev/tty: {e} — skipping subtask activation\n"
@@ -325,9 +327,9 @@ def handle_parent_started(old_task, new_task):
             if activate_all:
                 choice = 'y'
             else:
-                tty.write(f'[subtask] Activate "{clean_desc}"? [Y/n/a/q] ')
-                tty.flush()
-                raw_input = tty.readline().strip().lower()
+                tty_out.write(f'[subtask] Activate "{clean_desc}"? [Y/n/a/q] ')
+                tty_out.flush()
+                raw_input = tty_in.readline().strip().lower()
                 choice = raw_input if raw_input else 'y'
 
             if choice == 'q':
@@ -359,12 +361,13 @@ def handle_parent_started(old_task, new_task):
                 updated_annotations, ann_idx, line_idx, new_line
             )
 
-            tty.write(f'[subtask] → Created child {child_uuid[:8]}… "{clean_desc}"\n')
-            tty.flush()
+            tty_out.write(f'[subtask] → Created child {child_uuid[:8]}… "{clean_desc}"\n')
+            tty_out.flush()
             debug_log(f"Activated: '{clean_desc}' → {child_uuid}", 1)
 
     finally:
-        tty.close()
+        tty_in.close()
+        tty_out.close()
 
     new_task['annotations'] = updated_annotations
     if new_depends:
