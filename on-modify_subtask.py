@@ -13,7 +13,7 @@ if _os_timing.environ.get('TW_TIMING'):
 
 """
 Taskwarrior Subtask Hook - On-Modify
-Version: 1.2.0
+Version: 1.3.0
 Date: 2026-03-01
 
 Interactive prompting when a parent task is started. Marks dormant
@@ -134,6 +134,65 @@ UPDATE_PENDING_FILE = Path.home() / '.task' / 'subtask_update_pending.json'
 
 # Registry of child UUIDs created by this hook — used to filter Case 2
 SUBTASK_REGISTRY = Path.home() / '.task' / 'config' / 'subtask_registry.json'
+
+# Config file for subtask settings (subtask.end.alert, etc.)
+CONFIG_FILE = Path.home() / '.task' / 'config' / 'subtask.rc'
+
+# Any incomplete subtask annotation: dormant [ ] or active [P]
+INCOMPLETE_RE = re.compile(r'- \[[ P]\]')
+
+
+# ============================================================================
+# Config
+# ============================================================================
+
+def get_config(key, default=''):
+    if not CONFIG_FILE.exists():
+        return default
+    for line in CONFIG_FILE.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        k, _, v = line.partition('=')
+        if k.strip() == key:
+            return v.split('#')[0].strip() or default
+    return default
+
+
+# ============================================================================
+# Case 3: Parent task end alert — block or warn on incomplete subtasks
+# ============================================================================
+
+def check_end_alert(old_task, new_task):
+    """Enforce subtask.end.alert when a parent with incomplete subtasks ends.
+
+    subtask.end.alert = block  — output original task + exit 1 (TW rejects)
+    subtask.end.alert = warn   — print warning, let modification proceed
+    subtask.end.alert = off    — silent pass-through
+    """
+    alert = get_config('subtask.end.alert', 'warn')
+    if alert == 'off':
+        return
+
+    incomplete = [
+        ann for ann in old_task.get('annotations', [])
+        if INCOMPLETE_RE.search(ann.get('description', ''))
+    ]
+    if not incomplete:
+        return
+
+    count   = len(incomplete)
+    desc    = old_task.get('description', '')
+    action  = 'completing' if new_task.get('status') == 'completed' else 'deleting'
+    noun    = 'subtask' if count == 1 else 'subtasks'
+    message = f'[subtask] "{desc}" has {count} incomplete {noun}'
+
+    if alert == 'block':
+        print(f'{message} — {action} blocked', file=sys.stderr)
+        print(json.dumps(old_task))   # revert: output original task
+        sys.exit(1)
+    else:  # warn
+        print(f'{message}', file=sys.stderr)
 
 
 # ============================================================================
@@ -393,12 +452,20 @@ def main():
         sys.stderr.write(f"[subtask] ERROR parsing JSON: {e}\n")
         sys.exit(1)
 
+    old_status = old_task.get('status')
+    new_status = new_task.get('status')
+
     debug_log(
         f"uuid={new_task.get('uuid','?')} "
-        f"old_status={old_task.get('status')} new_status={new_task.get('status')} "
+        f"old_status={old_status} new_status={new_status} "
         f"start_event={'start' not in old_task and 'start' in new_task}",
         1
     )
+
+    # Case 3: parent task being completed or deleted — enforce end alert
+    if (old_status not in ('completed', 'deleted')
+            and new_status in ('completed', 'deleted')):
+        check_end_alert(old_task, new_task)  # may sys.exit(1) if blocked
 
     # Case 1: parent task started
     if 'start' not in old_task and 'start' in new_task:
@@ -407,8 +474,6 @@ def main():
         return
 
     # Case 2: child task completed or deleted — only for our subtasks
-    old_status = old_task.get('status')
-    new_status = new_task.get('status')
     if old_status != new_status and new_status in ('completed', 'deleted'):
         child_uuid = new_task.get('uuid', '')
         try:
