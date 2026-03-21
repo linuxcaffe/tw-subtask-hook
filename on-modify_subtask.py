@@ -13,7 +13,7 @@ if _os_timing.environ.get('TW_TIMING'):
 
 """
 Taskwarrior Subtask Hook - On-Modify
-Version: 1.3.0
+Version: 1.4.0
 Date: 2026-03-01
 
 Interactive prompting when a parent task is started. Marks dormant
@@ -38,6 +38,8 @@ import os
 import sys
 import json
 import re
+import termios
+import tty as ttymod
 import uuid as _uuid_module
 import subprocess
 from datetime import datetime
@@ -141,58 +143,209 @@ CONFIG_FILE = Path.home() / '.task' / 'config' / 'subtask.rc'
 # Any incomplete subtask annotation: dormant [ ] or active [P]
 INCOMPLETE_RE = re.compile(r'- \[[ P]\]')
 
+# Pending annotation with trailing uuid8: '- [P] desc ... abcd1234'
+PENDING_ANN_RE = re.compile(r'^- \[P\]\s+(.+?)\s+([0-9a-f]{8})\s*$')
 
-# ============================================================================
-# Config
-# ============================================================================
-
-def get_config(key, default=''):
-    if not CONFIG_FILE.exists():
-        return default
-    for line in CONFIG_FILE.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith('#') or '=' not in line:
-            continue
-        k, _, v = line.partition('=')
-        if k.strip() == key:
-            return v.split('#')[0].strip() or default
-    return default
+# Subprocess base — hooks off, no confirmation, silent
+TASK_BASE = ['task', 'rc.hooks=off', 'rc.confirmation=off', 'rc.verbose=nothing']
 
 
 # ============================================================================
-# Case 3: Parent task end alert — block or warn on incomplete subtasks
+# Terminal I/O helpers
 # ============================================================================
 
-def check_end_alert(old_task, new_task):
-    """Enforce subtask.end.alert when a parent with incomplete subtasks ends.
+def getch():
+    """Read one character from /dev/tty in raw mode."""
+    try:
+        with open('/dev/tty', 'r') as tty:
+            fd = tty.fileno()
+            old = termios.tcgetattr(fd)
+            try:
+                ttymod.setraw(fd)
+                ch = tty.read(1)
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            return ch
+    except Exception:
+        return 'q'
 
-    subtask.end.alert = block  — output original task + exit 1 (TW rejects)
-    subtask.end.alert = warn   — print warning, let modification proceed
-    subtask.end.alert = off    — silent pass-through
+
+def prompt_key(msg):
+    sys.stderr.write(msg)
+    sys.stderr.flush()
+    ch = getch()
+    sys.stderr.write(ch + '\n')
+    sys.stderr.flush()
+    return ch
+
+
+def task_run(*args):
+    return subprocess.run(TASK_BASE + list(args), capture_output=True, text=True)
+
+
+# ============================================================================
+# Registry helpers
+# ============================================================================
+
+def load_registry():
+    try:
+        if SUBTASK_REGISTRY.exists():
+            return json.loads(SUBTASK_REGISTRY.read_text())
+    except Exception:
+        pass
+    return []
+
+
+def save_registry(reg):
+    try:
+        SUBTASK_REGISTRY.write_text(json.dumps(reg, indent=2))
+    except Exception as e:
+        sys.stderr.write(f"[subtask] ERROR saving registry: {e}\n")
+
+
+# ============================================================================
+# Case 3: Parent task completed or deleted — interactive subtask cascade
+# ============================================================================
+
+def find_incomplete_subtasks(task, registry):
+    """Scan annotations for dormant (- [ ]) and pending (- [P]) subtasks.
+
+    Returns list of dicts:
+      type       'pending' | 'dormant'
+      desc       human description
+      full_uuid  UUID string if found in registry, else None  (pending only)
     """
-    alert = get_config('subtask.end.alert', 'warn')
-    if alert == 'off':
-        return
+    reg_by_short = {u[:8]: u for u in registry}
+    results = []
+    for ann in task.get('annotations', []):
+        for line in ann.get('description', '').splitlines():
+            line = line.strip()
+            m = PENDING_ANN_RE.match(line)
+            if m:
+                short = m.group(2)
+                results.append({
+                    'type':      'pending',
+                    'desc':      m.group(1).rsplit(None, 1)[0] if ' ' in m.group(1) else m.group(1),
+                    'full_uuid': reg_by_short.get(short),
+                })
+            elif INCOMPLETE_RE.match(line):
+                results.append({'type': 'dormant', 'desc': line[6:].strip(), 'full_uuid': None})
+    return results
 
-    incomplete = [
-        ann for ann in old_task.get('annotations', [])
-        if INCOMPLETE_RE.search(ann.get('description', ''))
-    ]
+
+def handle_parent_ending(old_task, new_task):
+    """Interactive cascade when a parent task is completed or deleted.
+
+    Finds incomplete subtasks (- [ ] dormant, - [P] pending) and offers
+    Y/n/a/q per pending subtask. Dormant subtasks (annotation-only, no child
+    task created) are listed as context but require no action.
+
+    If incomplete subtasks found: handles them, prints new_task, sys.exit(0).
+    If none found: returns silently (falls through to other cases).
+    """
+    registry = load_registry()
+    incomplete = find_incomplete_subtasks(old_task, registry)
     if not incomplete:
         return
 
-    count   = len(incomplete)
-    desc    = old_task.get('description', '')
-    action  = 'completing' if new_task.get('status') == 'completed' else 'deleting'
-    noun    = 'subtask' if count == 1 else 'subtasks'
-    message = f'[subtask] "{desc}" has {count} incomplete {noun}'
+    action      = 'Completing' if new_task.get('status') == 'completed' else 'Deleting'
+    parent_desc = old_task.get('description', '?')
+    parent_uuid = old_task.get('uuid', '')
+    parent_id   = old_task.get('id') or '?'
+    total       = len(incomplete)
+    noun        = 'subtask' if total == 1 else 'subtasks'
 
-    if alert == 'block':
-        print(f'{message} — {action} blocked', file=sys.stderr)
-        print(json.dumps(old_task))   # revert: output original task
+    sys.stderr.write(f"\n[subtask] {action} '{parent_desc}' — {total} incomplete {noun}:\n")
+    for s in incomplete:
+        marker = '- [P]' if s['type'] == 'pending' else '- [ ]'
+        note   = '' if s['type'] == 'pending' else '  (annotation only — no task created)'
+        sys.stderr.write(f"  {marker} {s['desc']}{note}\n")
+    sys.stderr.write('\n')
+
+    # Collect decisions for pending subtasks (dormant have no child task to act on)
+    actions = []
+    state   = {'accept_all': False, 'aborted': False}
+
+    for s in incomplete:
+        if s['type'] == 'dormant':
+            continue
+        if state['aborted']:
+            break
+
+        if state['accept_all']:
+            decision = 'Y'
+            sys.stderr.write(f"  Delete '{s['desc']}'? [Y/n/a/q] Y\n")
+        else:
+            decision = None
+            while decision is None:
+                ch = prompt_key(f"  Delete '{s['desc']}'? [Y/n/a/q] ")
+                if ch in ('Y', 'y', '\r', '\n', ' '):
+                    decision = 'Y'
+                elif ch in ('n', 'N'):
+                    decision = 'n'
+                elif ch in ('a', 'A'):
+                    decision = 'Y'
+                    state['accept_all'] = True
+                elif ch in ('q', 'Q', '\x03', '\x1b'):
+                    state['aborted'] = True
+                    break
+
+        if not state['aborted'] and decision:
+            actions.append((s, decision))
+
+    if state['aborted']:
+        sys.stderr.write('[subtask] Aborted.\n')
+        print(json.dumps(old_task))
         sys.exit(1)
-    else:  # warn
-        print(f'{message}', file=sys.stderr)
+
+    # Primary task asked last
+    action_lower = action.lower()
+    if state['accept_all']:
+        sys.stderr.write(f"  {action} [{parent_id}] '{parent_desc}' (primary)? Y\n")
+        primary_y = True
+    else:
+        primary_y = None
+        while primary_y is None:
+            ch = prompt_key(f"  {action} [{parent_id}] '{parent_desc}' (primary)? [Y/n/q] ")
+            if ch in ('Y', 'y', '\r', '\n', 'a', 'A', ' '):
+                primary_y = True
+            elif ch in ('n', 'N'):
+                primary_y = False
+            elif ch in ('q', 'Q', '\x03', '\x1b'):
+                sys.stderr.write('[subtask] Aborted.\n')
+                print(json.dumps(old_task))
+                sys.exit(1)
+
+    if not primary_y:
+        sys.stderr.write(f'[subtask] {action} cancelled.\n')
+        print(json.dumps(old_task))
+        sys.exit(1)
+
+    # Execute collected actions
+    sys.stderr.write('\n')
+    deleted_count = 0
+    for (s, decision) in actions:
+        full_uuid = s['full_uuid']
+        desc      = s['desc']
+        if decision == 'Y':
+            if full_uuid:
+                task_run(full_uuid, 'delete')
+                sys.stderr.write(f"[subtask] Deleted '{desc}'\n")
+                deleted_count += 1
+        else:  # 'n' — keep as standalone, remove from registry
+            sys.stderr.write(f"[subtask] Kept '{desc}' as standalone task\n")
+        if full_uuid and full_uuid in registry:
+            registry.remove(full_uuid)
+
+    save_registry(registry)
+    if deleted_count or actions:
+        sys.stderr.write(f"[subtask] {deleted_count} subtask(s) deleted\n")
+
+    # Strip depends so TW doesn't trigger its own chain-fix prompt
+    out = dict(new_task)
+    out.pop('depends', None)
+    print(json.dumps(out))
+    sys.exit(0)
 
 
 # ============================================================================
@@ -462,10 +615,10 @@ def main():
         1
     )
 
-    # Case 3: parent task being completed or deleted — enforce end alert
+    # Case 3: parent task being completed or deleted — interactive subtask cascade
     if (old_status not in ('completed', 'deleted')
             and new_status in ('completed', 'deleted')):
-        check_end_alert(old_task, new_task)  # may sys.exit(1) if blocked
+        handle_parent_ending(old_task, new_task)  # exits if subtasks found; returns if none
 
     # Case 1: parent task started
     if 'start' not in old_task and 'start' in new_task:
