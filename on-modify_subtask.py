@@ -605,6 +605,12 @@ def main():
         sys.stderr.write(f"[subtask] ERROR parsing JSON: {e}\n")
         sys.exit(1)
 
+    if os.environ.get('TW_WEB'):
+        # Non-interactive web context — skip interactive subtask cascade prompts.
+        # Task state change proceeds; subtask relationships are preserved unchanged.
+        print(json.dumps(new_task))
+        sys.exit(0)
+
     old_status = old_task.get('status')
     new_status = new_task.get('status')
 
