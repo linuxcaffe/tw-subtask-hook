@@ -118,7 +118,7 @@ ATTR_ABBREV = {
 }
 
 # Dormant subtask line: - [ ] <content>
-DORMANT_RE = re.compile(r'^- \[ \]\s+(.+?)$')
+DORMANT_RE = re.compile(r'^- ?\[ \]\s+(.+?)$')
 
 # Inline attribute overrides in annotation text
 INLINE_ATTR_RE = re.compile(
@@ -141,10 +141,10 @@ SUBTASK_REGISTRY = Path.home() / '.task' / 'config' / 'subtask_registry.json'
 CONFIG_FILE = Path.home() / '.task' / 'config' / 'subtask.rc'
 
 # Any incomplete subtask annotation: dormant [ ] or active [P]
-INCOMPLETE_RE = re.compile(r'- \[[ P]\]')
+INCOMPLETE_RE = re.compile(r'- ?\[[ P]\]')
 
 # Pending annotation with trailing uuid8: '- [P] desc ... abcd1234'
-PENDING_ANN_RE = re.compile(r'^- \[P\]\s+(.+?)\s+([0-9a-f]{8})\s*$')
+PENDING_ANN_RE = re.compile(r'^- ?\[P\]\s+(.+?)\s+([0-9a-f]{8})\s*$')
 
 # Subprocess base — hooks off, no confirmation, silent
 TASK_BASE = ['task', 'rc.hooks=off', 'rc.confirmation=off', 'rc.verbose=nothing']
@@ -476,16 +476,23 @@ def handle_parent_started(old_task, new_task):
 
     debug_log(f"handle_parent_started: {len(dormant)} dormant subtask(s)", 1)
 
+    # Non-interactive clients signal PTY routing before attempting /dev/tty.
+    if os.environ.get('TW_NOINTERACT'):
+        import json as _json
+        print(_json.dumps({
+            'type': 'tw_needs_pty',
+            'cmd':  os.environ.get('TW_PREFLIGHT_CMD', ''),
+        }), file=sys.stderr)
+        sys.exit(1)
+
     # Open /dev/tty via raw fd — TextIOWrapper calls tell() on init which
     # raises UnsupportedOperation on character devices.
     try:
         tty_fd = os.open('/dev/tty', os.O_RDWR | os.O_NOCTTY)
     except OSError as e:
-        sys.stderr.write(
-            f"[subtask] Cannot open /dev/tty: {e} — skipping subtask activation\n"
-        )
+        sys.stderr.write(f"[subtask] Cannot open /dev/tty: {e} — skipping subtask activation\n")
         print(json.dumps(new_task))
-        return
+        sys.exit(1)
 
     def tty_write(s):
         os.write(tty_fd, s.encode())
@@ -605,9 +612,21 @@ def main():
         sys.stderr.write(f"[subtask] ERROR parsing JSON: {e}\n")
         sys.exit(1)
 
-    if os.environ.get('TW_WEB'):
-        # Non-interactive web context — skip interactive subtask cascade prompts.
-        # Task state change proceeds; subtask relationships are preserved unchanged.
+    if os.environ.get('TW_NOINTERACT'):
+        # Non-interactive client — signal PTY needed if dormant subtasks exist.
+        old_status = old_task.get('status')
+        new_status = new_task.get('status')
+        being_started = 'start' not in old_task and 'start' in new_task
+        if being_started:
+            annotations = new_task.get('annotations', [])
+            dormant = collect_dormant_subtasks(annotations)
+            if dormant:
+                import json as _json
+                print(_json.dumps({
+                    'type': 'tw_needs_pty',
+                    'cmd':  os.environ.get('TW_PREFLIGHT_CMD', ''),
+                }), file=sys.stderr)
+                sys.exit(1)
         print(json.dumps(new_task))
         sys.exit(0)
 
