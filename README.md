@@ -119,6 +119,14 @@ task 3f8a1b2c done
 # Parent annotation: - [P] Stack the wood project:home +outdoor +chores → - [C] Stack the wood project:home +outdoor +chores <uuid>
 ```
 
+## Non-interactive clients (tw-web)
+
+Activating subtasks asks a question per subtask, which needs a terminal. Under a client that sets
+`TW_NOINTERACT=1`, starting a task that has dormant subtasks stops and signals `tw_needs_pty`, so the
+client can offer to run `task <id> start` in a terminal. Starts without dormant subtasks, and completing
+children, work as usual. The client ↔ hook contract is in awesome-taskwarrior's
+[CONVENTIONS.md](https://github.com/linuxcaffe/awesome-taskwarrior/blob/main/CONVENTIONS.md).
+
 ## Debugging
 
 ```bash
