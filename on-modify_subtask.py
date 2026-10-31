@@ -429,6 +429,17 @@ def build_child_task(annotation_content, parent_task, child_uuid):
 # Annotation line helpers
 # ============================================================================
 
+def needs_pty(task, dormant):
+    """No terminal for the questions: refuse, and ask the client for one (CONVENTIONS §2)."""
+    print(json.dumps({
+        'type': 'tw_needs_pty',
+        'cmd':  os.environ.get('TW_PREFLIGHT_CMD', ''),
+        'reason': "subtask: starting '{}' asks about {} dormant subtask(s)".format(
+            task.get('description', '')[:60], len(dormant)),
+    }), file=sys.stderr)
+    sys.exit(1)
+
+
 def collect_dormant_subtasks(annotations):
     """Scan every line of every annotation for dormant subtask patterns.
 
@@ -478,12 +489,7 @@ def handle_parent_started(old_task, new_task):
 
     # Non-interactive clients signal PTY routing before attempting /dev/tty.
     if os.environ.get('TW_NOINTERACT'):
-        import json as _json
-        print(_json.dumps({
-            'type': 'tw_needs_pty',
-            'cmd':  os.environ.get('TW_PREFLIGHT_CMD', ''),
-        }), file=sys.stderr)
-        sys.exit(1)
+        needs_pty(new_task, dormant)
 
     # Open /dev/tty via raw fd — TextIOWrapper calls tell() on init which
     # raises UnsupportedOperation on character devices.
@@ -621,12 +627,7 @@ def main():
             annotations = new_task.get('annotations', [])
             dormant = collect_dormant_subtasks(annotations)
             if dormant:
-                import json as _json
-                print(_json.dumps({
-                    'type': 'tw_needs_pty',
-                    'cmd':  os.environ.get('TW_PREFLIGHT_CMD', ''),
-                }), file=sys.stderr)
-                sys.exit(1)
+                needs_pty(new_task, dormant)
         print(json.dumps(new_task))
         sys.exit(0)
 
